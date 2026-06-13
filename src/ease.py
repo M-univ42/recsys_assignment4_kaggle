@@ -1,5 +1,3 @@
-"""EASE baseline (Steck, "Embarrassingly Shallow Autoencoders")."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,8 +11,13 @@ from data import InteractionData
 
 
 class EASE:
-    def __init__(self, l2: float = 100.0):
+    def __init__(self, l2: float = 100.0, pop_reg: float = 0.0):
         self.l2 = l2
+        # EDLAE-style popularity-weighted ridge (Steck 2020): the diagonal
+        # penalty becomes l2 + pop_reg * G_jj, so frequent items are regularized
+        # more -- the closed-form effect of emphasized dropout-denoising, which
+        # curbs EASE's overfitting toward the identity. pop_reg=0 is plain EASE.
+        self.pop_reg = pop_reg
         self.B: np.ndarray | None = None  # item x item weight matrix
 
     def fit(self, X: sp.csr_matrix) -> "EASE":
@@ -22,7 +25,7 @@ class EASE:
 
     def fit_gram(self, G: np.ndarray) -> "EASE":
         Gl = G.copy()
-        Gl[np.diag_indices_from(Gl)] += self.l2
+        Gl[np.diag_indices_from(Gl)] += self.l2 + self.pop_reg * np.diag(G)
         P = scipy.linalg.inv(Gl, overwrite_a=True, check_finite=False)
         B = P / (-np.diag(P))
         B[np.diag_indices_from(B)] = 0.0
@@ -51,30 +54,39 @@ def main() -> None:
     import time
 
     data = InteractionData("data", val_frac=0.1)
-    X = data.to_csr("train")
-    G = (X.T @ X).toarray().astype(np.float64)
 
-    best_l2, best_recall = None, -1.0
+    # Joint sweep: recency half-life (None = unweighted) x L2. Recall is nearly
+    # flat in lambda (the Gram is well-conditioned here), so the grid refines the
+    # recency half-life -- the parameter that actually moves the metric -- around
+    # its peak and keeps a small lambda pair as flatness evidence. Each (hl, l2)
+    # is one ~35s matrix inversion; the Gram is reused across lambda.
+    best, best_recall = None, -1.0
     sweep = []
-    for l2 in [200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0]:
-        t0 = time.time()
-        model = EASE(l2).fit_gram(G)
-        recall = data.recall_at_k(model.recommend(X, data.val_users), k=10)
-        sweep.append((l2, recall))
-        marker = ""
-        if recall > best_recall:
-            best_l2, best_recall, marker = l2, recall, "  <- best"
-        print(f"lambda={l2:>8.1f}  val Recall@10={recall:.4f}"
-              f"  ({time.time() - t0:.0f}s){marker}", flush=True)
-    del G
+    for hl in [None, 365.0, 730.0, 1000.0, 1200.0, 1400.0, 1600.0, 2000.0]:
+        X = data.to_csr("train", half_life_days=hl)
+        G = (X.T @ X).toarray().astype(np.float64)
+        for l2 in [2000.0, 5000.0]:
+            t0 = time.time()
+            model = EASE(l2).fit_gram(G)
+            recall = data.recall_at_k(model.recommend(X, data.val_users), k=10)
+            sweep.append((hl, l2, recall))
+            marker = ""
+            if recall > best_recall:
+                best, best_recall, marker = (hl, l2), recall, "  <- best"
+            print(f"half_life={hl or 'inf':>6}  lambda={l2:>8.1f}"
+                  f"  val Recall@10={recall:.4f}"
+                  f"  ({time.time() - t0:.0f}s){marker}", flush=True)
+        del G
 
     Path("results").mkdir(exist_ok=True)
-    pd.DataFrame(sweep, columns=["l2", "recall_at_10"]).to_csv(
+    pd.DataFrame(sweep, columns=["half_life", "l2", "recall_at_10"]).to_csv(
         "results/ease_sweep.csv", index=False)
 
-    print(f"\nrefitting on full data with lambda={best_l2}", flush=True)
-    X_full = data.to_csr("full")
-    model = EASE(best_l2).fit(X_full)
+    hl, l2 = best
+    print(f"\nrefitting on full+test with half_life={hl}, lambda={l2}",
+          flush=True)
+    X_full = data.to_csr("full+test", half_life_days=hl)
+    model = EASE(l2).fit(X_full)
     recs = model.recommend(X_full, data.target_user_idx)
     path = data.write_submission(recs, "submission_ease.csv")
     print(f"wrote {path} (val Recall@10 was {best_recall:.4f})")

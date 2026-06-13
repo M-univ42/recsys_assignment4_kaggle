@@ -284,9 +284,9 @@ def main() -> None:
     save_recs(recs, "results/tiger_recs_val.csv")
 
     model, seqs, allowed, item_of, fallback, _ = run_fit(
-        data, "full", best_epoch)
+        data, "full+test", best_epoch)
     recs = recommend(model, seqs, data.target_user_idx, allowed, item_of,
-                     data.seen_items("full"), fallback, k=50)
+                     data.seen_items("full+test"), fallback, k=50)
     save_recs(recs, "results/tiger_recs_target.csv")
     top10 = {u: r[:10] for u, r in recs.items()}
     path = data.write_submission(top10, "submission_tiger.csv")

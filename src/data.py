@@ -33,6 +33,15 @@ class InteractionData:
         self.val_cutoff: int | None = None
         self._split(val_frac)
 
+        test = pd.read_csv(self.data_dir / "test.csv")
+        if dedupe:
+            test = test.drop_duplicates()
+        test["user_idx"] = test["user_id"].map(self._user_to_idx)
+        test["item_idx"] = test["item_id"].map(self._item_to_idx)
+        self.test_interactions = (
+            test.sort_values("timestamp", kind="stable").reset_index(drop=True)
+        )
+
         sub = pd.read_csv(self.data_dir / "sample_submission.csv")
         self.submission_template = sub
         self.target_users = sub["user_id"].to_numpy()
@@ -62,15 +71,30 @@ class InteractionData:
         )
 
 
-    def to_csr(self, split: str = "train") -> sp.csr_matrix:
+    def to_csr(self, split: str = "train",
+               half_life_days: float | None = None) -> sp.csr_matrix:
+        """Binary user x item matrix; optionally recency-weighted.
+
+        With `half_life_days`, each (user, item) entry is 0.5^(age/half_life)
+        of its most recent interaction, measured from the split's last
+        timestamp — older interactions count exponentially less.
+        """
         df = self._frame(split)
-        m = sp.csr_matrix(
-            (np.ones(len(df), dtype=np.float32),
-             (df["user_idx"], df["item_idx"])),
+        if half_life_days is None:
+            m = sp.csr_matrix(
+                (np.ones(len(df), dtype=np.float32),
+                 (df["user_idx"], df["item_idx"])),
+                shape=(self.n_users, self.n_items),
+            )
+            m.data[:] = 1.0  # collapse repeat interactions
+            return m
+        df = df.drop_duplicates(["user_idx", "item_idx"], keep="last")
+        age_days = (df["timestamp"].max() - df["timestamp"]) / 86_400_000
+        w = np.power(0.5, age_days / half_life_days).astype(np.float32)
+        return sp.csr_matrix(
+            (w, (df["user_idx"], df["item_idx"])),
             shape=(self.n_users, self.n_items),
         )
-        m.data[:] = 1.0  # collapse repeat interactions
-        return m
 
     def sequences(self, split: str = "train") -> dict[int, list[int]]:
         """Chronological item_idx list per user_idx (for SASRec-style models)."""
@@ -87,7 +111,13 @@ class InteractionData:
             return self.train
         if split == "full":
             return self.interactions
-        raise ValueError(f"unknown split {split!r}, use 'train' or 'full'")
+        if split == "full+test":
+            return pd.concat(
+                [self.interactions, self.test_interactions],
+                ignore_index=True,
+            ).sort_values("timestamp", kind="stable")
+        raise ValueError(
+            f"unknown split {split!r}, use 'train', 'full' or 'full+test'")
 
     @property
     def val_users(self) -> np.ndarray:

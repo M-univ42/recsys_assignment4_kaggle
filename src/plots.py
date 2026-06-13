@@ -19,20 +19,31 @@ POPULARITY_RECALL = 0.0095  # top-10 popular unseen items, same val split
 
 
 def plot_ease_sweep() -> None:
+    """Recall vs recency half-life, one line per λ (λ is nearly flat)."""
     sweep = pd.read_csv(RESULTS / "ease_sweep.csv")
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.semilogx(sweep["l2"], sweep["recall_at_10"], "o-", label="EASE")
+    # plot unweighted (NaN half-life) as a reference line
+    unw = sweep[sweep["half_life"].isna()]
+    if len(unw):
+        ax.axhline(unw["recall_at_10"].max(), color="tab:blue", ls=":",
+                   label=f"unweighted ({unw['recall_at_10'].max():.4f})")
+    weighted = sweep.dropna(subset=["half_life"])
+    for l2, grp in weighted.groupby("l2"):
+        grp = grp.sort_values("half_life")
+        ax.plot(grp["half_life"], grp["recall_at_10"], "o-",
+                label=f"λ={l2:g}", alpha=0.8)
     ax.axhline(POPULARITY_RECALL, color="gray", ls="--",
                label=f"popularity ({POPULARITY_RECALL:.4f})")
     best = sweep.loc[sweep["recall_at_10"].idxmax()]
-    ax.annotate(f"best: λ={best.l2:g}\nR@10={best.recall_at_10:.4f}",
-                xy=(best.l2, best.recall_at_10),
-                xytext=(0.55, 0.35), textcoords="axes fraction",
+    ax.annotate(f"best: half-life={best.half_life:g}d, λ={best.l2:g}\n"
+                f"R@10={best.recall_at_10:.4f}",
+                xy=(best.half_life, best.recall_at_10),
+                xytext=(0.45, 0.25), textcoords="axes fraction",
                 arrowprops={"arrowstyle": "->", "color": "black"})
-    ax.set_xlabel("L2 regularization λ (log scale)")
+    ax.set_xlabel("recency half-life (days)")
     ax.set_ylabel("Validation Recall@10")
-    ax.set_title("EASE: regularization sweep (temporal validation)")
-    ax.legend()
+    ax.set_title("EASE: recency weighting sweep (temporal validation)")
+    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(FIGURES / "ease_sweep.png", dpi=150)
     plt.close(fig)
